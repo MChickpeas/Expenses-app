@@ -1,11 +1,13 @@
 import os
+from decimal import Decimal, InvalidOperation
 
 from flask import Flask, abort, g, redirect, render_template, request, url_for
 from flask_migrate import Migrate
-from sqlalchemy import text
+from sqlalchemy import func, text
 
 from auth import verified_email
-from models import Group, GroupMember, User, db
+from balances import group_balances
+from models import Expense, ExpenseItem, Group, GroupMember, ItemShare, User, db
 
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["DATABASE_URL"]
@@ -14,12 +16,72 @@ db.init_app(app)
 migrate = Migrate(app, db)
 
 
+# ---------- helpers ----------
+
+@app.template_filter("money")
+def money(cents):
+    sign = "-" if cents < 0 else ""
+    cents = abs(cents)
+    return f"{sign}${cents // 100:,}.{cents % 100:02d}"
+
+
+def parse_cents(text):
+    """'12.50' -> 1250. Returns None for anything that isn't a positive dollar amount."""
+    try:
+        d = Decimal(text.strip().replace("$", "").replace(",", ""))
+    except InvalidOperation:
+        return None
+    if not d.is_finite() or d <= 0 or d.as_tuple().exponent < -2:
+        return None
+    return int(d * 100)
+
+
 def safe_next(target):
-    """Only allow redirects to paths on this site (blocks open-redirect tricks)."""
     if target and target.startswith("/") and not target.startswith("//"):
         return target
     return None
 
+
+def require_membership(group_id):
+    membership = db.session.get(GroupMember, (group_id, g.user.id))
+    if membership is None:
+        abort(404)
+    return membership
+
+
+def group_members(group_id):
+    return db.session.execute(
+        db.select(User)
+        .join(GroupMember, GroupMember.user_id == User.id)
+        .where(GroupMember.group_id == group_id)
+        .order_by(User.display_name)
+    ).scalars().all()
+
+
+def render_group(group_id, error=None):
+    group = db.session.get(Group, group_id)
+    members = group_members(group_id)
+    expenses = db.session.execute(
+        db.select(Expense, func.sum(ExpenseItem.amount_cents).label("total"))
+        .join(ExpenseItem, ExpenseItem.expense_id == Expense.id)
+        .where(Expense.group_id == group_id)
+        .group_by(Expense.id)
+        .order_by(Expense.spent_at.desc(), Expense.id.desc())
+    ).all()
+    return render_template(
+        "group.html",
+        group=group,
+        members=members,
+        names={m.id: m.display_name for m in members},
+        balances=group_balances(group_id),
+        expenses=expenses,
+        invite_url=url_for("join_group", code=group.invite_code,
+                           _external=True, _scheme="https"),
+        error=error,
+    )
+
+
+# ---------- auth ----------
 
 @app.before_request
 def load_user():
@@ -28,27 +90,7 @@ def load_user():
         db.select(User).filter_by(email=g.email)
     ).scalar_one_or_none()
     if g.user is None and request.endpoint not in ("welcome", "static"):
-        # Remember where they were headed (e.g. an invite link)
         return redirect(url_for("welcome", next=request.path))
-
-
-def require_membership(group_id):
-    """404 if the current user isn't in this group — don't even confirm it exists."""
-    membership = db.session.get(GroupMember, (group_id, g.user.id))
-    if membership is None:
-        abort(404)
-    return membership
-
-
-@app.get("/")
-def home():
-    groups = db.session.execute(
-        db.select(Group)
-        .join(GroupMember, GroupMember.group_id == Group.id)
-        .where(GroupMember.user_id == g.user.id)
-        .order_by(Group.name)
-    ).scalars().all()
-    return render_template("home.html", groups=groups)
 
 
 @app.route("/welcome", methods=["GET", "POST"])
@@ -68,6 +110,19 @@ def welcome():
     return render_template("welcome.html", error=error, next_url=next_url or "")
 
 
+# ---------- groups ----------
+
+@app.get("/")
+def home():
+    groups = db.session.execute(
+        db.select(Group)
+        .join(GroupMember, GroupMember.group_id == Group.id)
+        .where(GroupMember.user_id == g.user.id)
+        .order_by(Group.name)
+    ).scalars().all()
+    return render_template("home.html", groups=groups)
+
+
 @app.post("/groups")
 def create_group():
     name = request.form.get("name", "").strip()
@@ -75,26 +130,16 @@ def create_group():
         abort(400)
     group = Group(name=name, created_by=g.user.id)
     db.session.add(group)
-    db.session.flush()  # sends the INSERT so group.id exists, without committing yet
+    db.session.flush()
     db.session.add(GroupMember(group_id=group.id, user_id=g.user.id, role="owner"))
-    db.session.commit()  # both rows saved together, or neither
+    db.session.commit()
     return redirect(url_for("group_detail", group_id=group.id))
 
 
 @app.get("/groups/<int:group_id>")
 def group_detail(group_id):
     require_membership(group_id)
-    group = db.session.get(Group, group_id)
-    members = db.session.execute(
-        db.select(User)
-        .join(GroupMember, GroupMember.user_id == User.id)
-        .where(GroupMember.group_id == group_id)
-        .order_by(User.display_name)
-    ).scalars().all()
-    invite_url = url_for("join_group", code=group.invite_code,
-                         _external=True, _scheme="https")
-    return render_template("group.html", group=group, members=members,
-                           invite_url=invite_url)
+    return render_group(group_id)
 
 
 @app.route("/join/<code>", methods=["GET", "POST"])
@@ -111,6 +156,46 @@ def join_group(code):
         db.session.commit()
         return redirect(url_for("group_detail", group_id=group.id))
     return render_template("join.html", group=group)
+
+
+# ---------- expenses ----------
+
+@app.post("/groups/<int:group_id>/expenses")
+def add_expense(group_id):
+    require_membership(group_id)
+    member_ids = {m.id for m in group_members(group_id)}
+
+    description = request.form.get("description", "").strip()
+    amount_cents = parse_cents(request.form.get("amount", ""))
+    try:
+        paid_by = int(request.form.get("paid_by", ""))
+        participants = {int(x) for x in request.form.getlist("participants")}
+    except ValueError:
+        abort(400)
+
+    error = None
+    if not 1 <= len(description) <= 200:
+        error = "Description must be 1–200 characters."
+    elif amount_cents is None:
+        error = "Enter a positive amount like 12.50."
+    elif paid_by not in member_ids:
+        error = "The payer must be in this group."
+    elif not participants or not participants <= member_ids:
+        error = "Pick at least one person from this group to split with."
+    if error:
+        return render_group(group_id, error=error), 400
+
+    expense = Expense(group_id=group_id, paid_by=paid_by,
+                      created_by=g.user.id, description=description)
+    db.session.add(expense)
+    db.session.flush()
+    item = ExpenseItem(expense_id=expense.id, description=description,
+                       amount_cents=amount_cents)
+    db.session.add(item)
+    db.session.flush()
+    db.session.add_all([ItemShare(item_id=item.id, user_id=u) for u in participants])
+    db.session.commit()
+    return redirect(url_for("group_detail", group_id=group_id))
 
 
 @app.get("/db-check")

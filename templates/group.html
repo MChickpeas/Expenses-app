@@ -4,6 +4,48 @@
   <p><a href="{{ url_for('home') }}">← Home</a></p>
   <h1>{{ group.name }}</h1>
 
+  <h2>Balances</h2>
+  <ul>
+    {% for m in members %}
+      {% set b = balances.get(m.id, 0) %}
+      <li>{{ m.display_name }}:
+        {% if b > 0 %}is owed {{ b|money }}
+        {% elif b < 0 %}owes {{ (-b)|money }}
+        {% else %}settled up{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+
+  <h2>Add expense</h2>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <form method="post" action="{{ url_for('add_expense', group_id=group.id) }}">
+    <p><input name="description" maxlength="200" required placeholder="What was it?"></p>
+    <p><input name="amount" inputmode="decimal" required placeholder="Amount, e.g. 30.00"></p>
+    <p>Paid by
+      <select name="paid_by">
+        {% for m in members %}
+          <option value="{{ m.id }}" {% if m.id == g.user.id %}selected{% endif %}>{{ m.display_name }}</option>
+        {% endfor %}
+      </select>
+    </p>
+    <p>Split between:</p>
+    {% for m in members %}
+      <label><input type="checkbox" name="participants" value="{{ m.id }}" checked> {{ m.display_name }}</label><br>
+    {% endfor %}
+    <p><button type="submit">Add expense</button></p>
+  </form>
+
+  <h2>Expenses</h2>
+  {% if expenses %}
+    <ul>
+      {% for exp, total in expenses %}
+        <li>{{ exp.spent_at }} — {{ exp.description }}: {{ total|money }}, paid by {{ names[exp.paid_by] }}</li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No expenses yet.</p>
+  {% endif %}
+
   <h2>Members</h2>
   <ul>
     {% for m in members %}<li>{{ m.display_name }}</li>{% endfor %}
