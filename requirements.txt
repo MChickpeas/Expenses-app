@@ -4,3 +4,4 @@ sqlalchemy
 psycopg[binary]
 flask-sqlalchemy
 flask-migrate
+pyjwt[crypto]

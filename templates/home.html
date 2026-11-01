@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Hi, {{ g.user.display_name }}</h1>
+  <p>Signed in as {{ g.user.email }}.</p>
+{% endblock %}
