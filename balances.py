@@ -3,17 +3,43 @@ from collections import defaultdict
 from models import Expense, ExpenseItem, GroupMember, ItemShare, Settlement, db
 
 
-def split_evenly(amount_cents, user_ids, poster_id, payer_id):
-    users = sorted(user_ids)
-    base, remainder = divmod(amount_cents, len(users))
-    shares = {u: base for u in users}
-    if poster_id in shares:
-        lucky = poster_id
-    elif payer_id in shares:
-        lucky = payer_id
-    else:
-        lucky = users[0]
-    shares[lucky] += remainder
+def _lucky(candidates, poster_id, payer_id):
+    """Who absorbs leftover cents: poster, else payer, else lowest user id."""
+    if poster_id in candidates:
+        return poster_id
+    if payer_id in candidates:
+        return payer_id
+    return min(candidates)
+
+
+def allocate(amount_cents, weights, poster_id, payer_id):
+    """Split amount_cents in proportion to weights, rounding each share DOWN.
+    Equal weights = even split. Leftover cents go to _lucky()."""
+    total_weight = sum(weights.values())
+    shares = {u: amount_cents * w // total_weight for u, w in weights.items()}
+    leftover = amount_cents - sum(shares.values())
+    shares[_lucky(shares, poster_id, payer_id)] += leftover
+    return shares
+
+
+def expense_shares(expense, items):
+    """items: list of (amount_cents, [user_ids]). Returns {user_id: cents owed}."""
+    poster, payer = expense.created_by, expense.paid_by
+
+    subtotals = defaultdict(int)
+    for amount_cents, sharers in items:
+        for u, c in allocate(amount_cents, {u: 1 for u in sharers}, poster, payer).items():
+            subtotals[u] += c
+    subtotals = dict(subtotals)
+
+    shares = dict(subtotals)
+    if expense.tax_cents:
+        for u, c in allocate(expense.tax_cents, subtotals, poster, payer).items():
+            shares[u] += c
+    if expense.tip_cents:
+        weights = subtotals if expense.tip_mode == "proportional" else {u: 1 for u in subtotals}
+        for u, c in allocate(expense.tip_cents, weights, poster, payer).items():
+            shares[u] += c
     return shares
 
 
@@ -30,25 +56,25 @@ def group_balances(group_id):
         db.select(Expense).where(Expense.group_id == group_id)
     ).scalars().all()
     for exp in expenses:
-        if exp.tax_cents or exp.tip_cents:
-            raise NotImplementedError("Tax/tip splitting isn't built yet")
-        items = db.session.execute(
+        items = []
+        for item in db.session.execute(
             db.select(ExpenseItem).where(ExpenseItem.expense_id == exp.id)
-        ).scalars().all()
-        for item in items:
+        ).scalars():
             sharers = db.session.execute(
                 db.select(ItemShare.user_id).where(ItemShare.item_id == item.id)
             ).scalars().all()
-            balances[exp.paid_by] += item.amount_cents
-            for uid, cents in split_evenly(item.amount_cents, sharers, exp.created_by, exp.paid_by).items():
-                balances[uid] -= cents
+            items.append((item.amount_cents, sharers))
 
-    settlements = db.session.execute(
+        total = sum(a for a, _ in items) + exp.tax_cents + exp.tip_cents
+        balances[exp.paid_by] += total
+        for uid, cents in expense_shares(exp, items).items():
+            balances[uid] -= cents
+
+    for s in db.session.execute(
         db.select(Settlement).where(
             Settlement.group_id == group_id, Settlement.status == "confirmed"
         )
-    ).scalars().all()
-    for s in settlements:
+    ).scalars():
         balances[s.from_user] += s.amount_cents
         balances[s.to_user] -= s.amount_cents
 

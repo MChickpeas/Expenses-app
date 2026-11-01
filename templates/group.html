@@ -19,8 +19,7 @@
   <h2>Add expense</h2>
   {% if error %}<p class="error">{{ error }}</p>{% endif %}
   <form method="post" action="{{ url_for('add_expense', group_id=group.id) }}">
-    <p><input name="description" maxlength="200" required placeholder="What was it?"></p>
-    <p><input name="amount" inputmode="decimal" required placeholder="Amount, e.g. 30.00"></p>
+    <p><input name="description" maxlength="200" required placeholder="What was it? e.g. Dinner"></p>
     <p>Paid by
       <select name="paid_by">
         {% for m in members %}
@@ -28,18 +27,58 @@
         {% endfor %}
       </select>
     </p>
-    <p>Split between:</p>
-    {% for m in members %}
-      <label><input type="checkbox" name="participants" value="{{ m.id }}" checked> {{ m.display_name }}</label><br>
-    {% endfor %}
+
+    <div id="items"></div>
+    <p><button type="button" id="add-item">+ Add item</button></p>
+
+    <p>Tax <input name="tax" inputmode="decimal" placeholder="0.00"></p>
+    <p>Tip <input name="tip" inputmode="decimal" placeholder="0.00">
+      <select name="tip_mode">
+        <option value="even">split evenly</option>
+        <option value="proportional">by what each ordered</option>
+      </select>
+    </p>
     <p><button type="submit">Add expense</button></p>
   </form>
+
+  <template id="item-template">
+    <fieldset>
+      <input name="item-__I__-desc" maxlength="200" placeholder="Item (optional)">
+      <input name="item-__I__-amount" inputmode="decimal" placeholder="Amount">
+      <div>
+        {% for m in members %}
+          <label><input type="checkbox" name="item-__I__-sharers" value="{{ m.id }}" checked> {{ m.display_name }}</label>
+        {% endfor %}
+      </div>
+      <button type="button" class="remove-item">Remove</button>
+    </fieldset>
+  </template>
+
+  <script>
+    (function () {
+      const items = document.getElementById("items");
+      const tpl = document.getElementById("item-template").innerHTML;
+      let next = 0;
+      function addItem() {
+        const wrapper = document.createElement("div");
+        wrapper.innerHTML = tpl.replaceAll("__I__", next++);
+        const row = wrapper.firstElementChild;
+        row.querySelector(".remove-item").addEventListener("click", function () {
+          if (items.children.length > 1) row.remove();
+        });
+        items.appendChild(row);
+      }
+      document.getElementById("add-item").addEventListener("click", addItem);
+      addItem();  // start with one item row
+    })();
+  </script>
 
   <h2>Expenses</h2>
   {% if expenses %}
     <ul>
       {% for exp, total in expenses %}
-        <li>{{ exp.spent_at }} — {{ exp.description }}: {{ total|money }}, paid by {{ names[exp.paid_by] }}</li>
+        <li>{{ exp.spent_at }} — {{ exp.description }}:
+          {{ (total + exp.tax_cents + exp.tip_cents)|money }}, paid by {{ names[exp.paid_by] }}</li>
       {% endfor %}
     </ul>
   {% else %}

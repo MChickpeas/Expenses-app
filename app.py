@@ -25,13 +25,18 @@ def money(cents):
     return f"{sign}${cents // 100:,}.{cents % 100:02d}"
 
 
-def parse_cents(text):
-    """'12.50' -> 1250. Returns None for anything that isn't a positive dollar amount."""
+def parse_cents(text, allow_zero=False):
+    """'12.50' -> 1250. Blank -> 0 if allow_zero. None means invalid."""
+    text = text.strip().replace("$", "").replace(",", "")
+    if allow_zero and text == "":
+        return 0
     try:
-        d = Decimal(text.strip().replace("$", "").replace(",", ""))
+        d = Decimal(text)
     except InvalidOperation:
         return None
-    if not d.is_finite() or d <= 0 or d.as_tuple().exponent < -2:
+    if not d.is_finite() or d.as_tuple().exponent < -2:
+        return None
+    if d < 0 or (d == 0 and not allow_zero):
         return None
     return int(d * 100)
 
@@ -164,39 +169,72 @@ def join_group(code):
 def add_expense(group_id):
     require_membership(group_id)
     member_ids = {m.id for m in group_members(group_id)}
+    form = request.form
 
-    description = request.form.get("description", "").strip()
-    amount_cents = parse_cents(request.form.get("amount", ""))
+    description = form.get("description", "").strip()
+    tax_cents = parse_cents(form.get("tax", ""), allow_zero=True)
+    tip_cents = parse_cents(form.get("tip", ""), allow_zero=True)
+    tip_mode = form.get("tip_mode", "even")
     try:
-        paid_by = int(request.form.get("paid_by", ""))
-        participants = {int(x) for x in request.form.getlist("participants")}
+        paid_by = int(form.get("paid_by", ""))
     except ValueError:
+        abort(400)
+    if tip_mode not in ("even", "proportional"):
         abort(400)
 
     error = None
     if not 1 <= len(description) <= 200:
         error = "Description must be 1–200 characters."
-    elif amount_cents is None:
-        error = "Enter a positive amount like 12.50."
     elif paid_by not in member_ids:
         error = "The payer must be in this group."
-    elif not participants or not participants <= member_ids:
-        error = "Pick at least one person from this group to split with."
+    elif tax_cents is None or tip_cents is None:
+        error = "Tax and tip must be amounts like 3.00, or left blank."
+
+    # Item rows arrive as item-0-amount, item-3-desc, ... (gaps happen when rows are removed)
+    indices = sorted({
+        int(k.split("-")[1]) for k in form
+        if k.startswith("item-") and k.split("-")[1].isdigit()
+    })
+    items = []
+    for i in indices:
+        if error:
+            break
+        desc = form.get(f"item-{i}-desc", "").strip()
+        raw_amount = form.get(f"item-{i}-amount", "").strip()
+        if not desc and not raw_amount:
+            continue  # ignore completely blank rows
+        amount = parse_cents(raw_amount)
+        try:
+            sharers = {int(x) for x in form.getlist(f"item-{i}-sharers")}
+        except ValueError:
+            abort(400)
+        n = len(items) + 1
+        if amount is None:
+            error = f"Item {n}: enter a positive amount like 12.50."
+        elif not sharers or not sharers <= member_ids:
+            error = f"Item {n}: pick at least one person from this group."
+        else:
+            items.append((desc[:200] or description, amount, sharers))
+
+    if not error and not items:
+        error = "Add at least one item."
+    elif not error and len(items) > 50:
+        error = "That's more than 50 items. Split it into multiple expenses."
     if error:
         return render_group(group_id, error=error), 400
 
-    expense = Expense(group_id=group_id, paid_by=paid_by,
-                      created_by=g.user.id, description=description)
+    expense = Expense(group_id=group_id, paid_by=paid_by, created_by=g.user.id,
+                      description=description, tax_cents=tax_cents,
+                      tip_cents=tip_cents, tip_mode=tip_mode)
     db.session.add(expense)
     db.session.flush()
-    item = ExpenseItem(expense_id=expense.id, description=description,
-                       amount_cents=amount_cents)
-    db.session.add(item)
-    db.session.flush()
-    db.session.add_all([ItemShare(item_id=item.id, user_id=u) for u in participants])
+    for desc, amount, sharers in items:
+        item = ExpenseItem(expense_id=expense.id, description=desc, amount_cents=amount)
+        db.session.add(item)
+        db.session.flush()
+        db.session.add_all([ItemShare(item_id=item.id, user_id=u) for u in sharers])
     db.session.commit()
     return redirect(url_for("group_detail", group_id=group_id))
-
 
 @app.get("/db-check")
 def db_check():
