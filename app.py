@@ -14,7 +14,7 @@ migrate = Migrate(app, db)
 
 @app.get("/")
 def home():
-    return "Check 1"
+    return "Check 2"
 
 
 @app.get("/db-check")

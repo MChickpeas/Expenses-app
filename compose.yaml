@@ -2,7 +2,7 @@ services:
   expenses:
     build: .
     ports:
-      - "8081:8000"
+      - "127.0.0.1:8081:8000"
     volumes:
       - .:/app
     command: ["gunicorn", "-b", "0.0.0.0:8000", "--reload", "app:app"]
