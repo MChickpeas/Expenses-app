@@ -1,11 +1,15 @@
 import os
 
 from flask import Flask
-from sqlalchemy import create_engine, text
+from flask_migrate import Migrate
+from sqlalchemy import text
+
+from models import db
 
 app = Flask(__name__)
-
-engine = create_engine(os.environ["DATABASE_URL"])
+app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["DATABASE_URL"]
+db.init_app(app)
+migrate = Migrate(app, db)
 
 
 @app.get("/")
@@ -15,6 +19,5 @@ def home():
 
 @app.get("/db-check")
 def db_check():
-    with engine.connect() as conn:
-        version = conn.execute(text("SELECT version()")).scalar()
+    version = db.session.execute(text("SELECT version()")).scalar()
     return f"DB OK: {version}"
