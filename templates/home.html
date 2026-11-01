@@ -1,5 +1,21 @@
 {% extends "base.html" %}
 {% block content %}
   <h1>Hi, {{ g.user.display_name }}</h1>
-  <p>Signed in as {{ g.user.email }}.</p>
+
+  <h2>Your groups</h2>
+  {% if groups %}
+    <ul>
+      {% for grp in groups %}
+        <li><a href="{{ url_for('group_detail', group_id=grp.id) }}">{{ grp.name }}</a></li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No groups yet.</p>
+  {% endif %}
+
+  <h2>New group</h2>
+  <form method="post" action="{{ url_for('create_group') }}">
+    <input name="name" maxlength="100" required placeholder="Group name">
+    <button type="submit">Create</button>
+  </form>
 {% endblock %}
