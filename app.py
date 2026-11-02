@@ -7,7 +7,7 @@ from sqlalchemy import func, text
 
 from auth import verified_email
 from balances import group_balances
-from models import Expense, ExpenseItem, Group, GroupMember, ItemShare, User, db
+from models import Expense, ExpenseItem, Group, GroupMember, ItemShare, Settlement, User, db
 
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["DATABASE_URL"]
@@ -73,6 +73,11 @@ def render_group(group_id, error=None):
         .group_by(Expense.id)
         .order_by(Expense.spent_at.desc(), Expense.id.desc())
     ).all()
+    settlements = db.session.execute(
+        db.select(Settlement)
+        .where(Settlement.group_id == group_id)
+        .order_by(Settlement.created_at.desc())
+    ).scalars().all()
     return render_template(
         "group.html",
         group=group,
@@ -80,6 +85,7 @@ def render_group(group_id, error=None):
         names={m.id: m.display_name for m in members},
         balances=group_balances(group_id),
         expenses=expenses,
+        settlements=settlements,
         invite_url=url_for("join_group", code=group.invite_code,
                            _external=True, _scheme="https"),
         error=error,
@@ -240,3 +246,52 @@ def add_expense(group_id):
 def db_check():
     version = db.session.execute(text("SELECT version()")).scalar()
     return f"DB OK: {version}"
+
+# ---------- settlements ----------
+
+@app.post("/groups/<int:group_id>/settlements")
+def record_settlement(group_id):
+    require_membership(group_id)
+    member_ids = {m.id for m in group_members(group_id)}
+    amount_cents = parse_cents(request.form.get("amount", ""))
+    try:
+        to_user = int(request.form.get("to_user", ""))
+    except ValueError:
+        abort(400)
+
+    error = None
+    if to_user not in member_ids or to_user == g.user.id:
+        error = "Pick someone else in this group."
+    elif amount_cents is None:
+        error = "Enter a positive amount like 15.00."
+    if error:
+        return render_group(group_id, error=error), 400
+
+    db.session.add(Settlement(group_id=group_id, from_user=g.user.id,
+                              to_user=to_user, amount_cents=amount_cents))
+    db.session.commit()
+    return redirect(url_for("group_detail", group_id=group_id))
+
+
+@app.post("/settlements/<int:settlement_id>/confirm")
+def confirm_settlement(settlement_id):
+    s = db.session.get(Settlement, settlement_id)
+    # Only the receiver, only while pending. Anything else looks like "not found".
+    if s is None or s.to_user != g.user.id or s.status != "pending":
+        abort(404)
+    s.status = "confirmed"
+    s.confirmed_at = func.now()
+    db.session.commit()
+    return redirect(url_for("group_detail", group_id=s.group_id))
+
+
+@app.post("/settlements/<int:settlement_id>/delete")
+def delete_settlement(settlement_id):
+    s = db.session.get(Settlement, settlement_id)
+    # Pending only; sender may cancel, receiver may reject.
+    if s is None or s.status != "pending" or g.user.id not in (s.from_user, s.to_user):
+        abort(404)
+    group_id = s.group_id
+    db.session.delete(s)
+    db.session.commit()
+    return redirect(url_for("group_detail", group_id=group_id))

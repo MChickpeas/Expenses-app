@@ -16,6 +16,49 @@
     {% endfor %}
   </ul>
 
+    <h2>Record a payment</h2>
+  <form method="post" action="{{ url_for('record_settlement', group_id=group.id) }}">
+    I sent
+    <input name="amount" inputmode="decimal" required placeholder="15.00" size="8">
+    to
+    <select name="to_user">
+      {% for m in members if m.id != g.user.id %}
+        <option value="{{ m.id }}">{{ m.display_name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Record</button>
+  </form>
+
+  <h2>Payments</h2>
+  {% if settlements %}
+    <ul>
+      {% for s in settlements %}
+        <li>
+          {{ names[s.from_user] }} → {{ names[s.to_user] }}: {{ s.amount_cents|money }}
+          {% if s.status == "confirmed" %}
+            ✓ confirmed
+          {% else %}
+            <em>pending</em>
+            {% if s.to_user == g.user.id %}
+              <form method="post" action="{{ url_for('confirm_settlement', settlement_id=s.id) }}" style="display:inline">
+                <button type="submit">Confirm received</button>
+              </form>
+              <form method="post" action="{{ url_for('delete_settlement', settlement_id=s.id) }}" style="display:inline">
+                <button type="submit">Reject</button>
+              </form>
+            {% elif s.from_user == g.user.id %}
+              <form method="post" action="{{ url_for('delete_settlement', settlement_id=s.id) }}" style="display:inline">
+                <button type="submit">Cancel</button>
+              </form>
+            {% endif %}
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No payments yet.</p>
+  {% endif %}
+
   <h2>Add expense</h2>
   {% if error %}<p class="error">{{ error }}</p>{% endif %}
   <form method="post" action="{{ url_for('add_expense', group_id=group.id) }}">
